@@ -1,3 +1,2 @@
 # Problems
-The ever met problems.
-Problems Collection.
+Problems Collection and some learning note.
