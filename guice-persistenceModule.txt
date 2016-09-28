@@ -1,0 +1,313 @@
+Module persistModule = new JpaPersistModule(...)
+    .addFinder(SomeFinder.class)
+    .addFinder(OtherFinder.class);
+
+---------------------------------------------------------------------------------------------------------------------------
+
+//QUESTION:
+
+I use com.google.inject.persist.jpa.JpaPersistModule in my application. The configuration is located in persistence.xml file, but some of the properties are dynamic and I don't want store them in this file (for example javax.persistence.jdbc.url etc) but rather inject them from some other source.
+
+I know that there's a JpaPersistModule.properties(java.util.Properties p) method that allows to do exactly what I need. The problem is that I don't see a good way to pass that java.util.Properties object to the module. I don't want to explicitely create an instance of java.util.Properties in the module code, but would rather use some guice-style mechanism to inject it.
+
+Is that possible at all? How would you decouple JPA module and its configuration properties?
+//ANSWER:
+public class DbModule extends AbstractModule {
+private final Properties properties;
+
+public DbModule(Properties properties) {
+    this.properties = properties;
+}
+
+@Override
+protected void configure() {
+    JpaPersistModule jpa = new JpaPersistModule("my-unit");
+    jpa.properties(properties);
+    jpa.configure(binder());
+    //bind other stuff here...
+}
+}
+---------------------------------------------------------------------------------------------------------------------------
+@Override
+public void initialize(Bootstrap<OregamiConfiguration> bootstrap) {
+
+    OregamiConfiguration configuration = StartHelper.createConfiguration(StartHelper.getConfigFilename());
+    Properties jpaProperties = StartHelper.createPropertiesFromConfiguration(configuration);
+
+    JpaPersistModule jpaPersistModule = new JpaPersistModule(configuration.getDatabaseConfiguration().getJpaUnit());
+    jpaPersistModule.properties(jpaProperties);
+
+    guiceBundle = GuiceBundle.<OregamiConfiguration>newBuilder()
+            .addModule(new OregamiGuiceModule())
+            .addModule(jpaPersistModule)
+            .enableAutoConfig("org.oregami")
+            .setConfigClass(OregamiConfiguration.class)
+            .build();
+    bootstrap.addBundle(guiceBundle);
+
+    SimpleModule module = new SimpleModule();
+    //module.addSerializer(LocalDateTime.class, new CustomLocalDateTimeSerializer());
+    //module.addSerializer(LocalDate.class, new CustomLocalDateSerializer());
+    bootstrap.getObjectMapper().registerModule(module);
+
+}
+---------------------------------------------------------------------------------------------------------------------------
+public static void init(String localConfigFilename) {
+    configFilename = localConfigFilename;
+    OregamiConfiguration configuration = createConfiguration(localConfigFilename);
+    Properties properties = createPropertiesFromConfiguration(configuration);
+    jpaUnit = configuration.getDatabaseConfiguration().getJpaUnit();
+    JpaPersistModule jpaPersistModule = new JpaPersistModule(jpaUnit);
+    jpaPersistModule.properties(properties);
+    injector = Guice.createInjector(jpaPersistModule, new OregamiGuiceModule());
+    try {
+        injector.getInstance(PersistService.class).start();
+    } catch (PersistenceException e) {
+        throw new RuntimeException("Database error", e);
+    }
+
+}
+---------------------------------------------------------------------------------------------------------------------------
+@Override
+@SneakyThrows
+protected void configure() {
+    final JpaPersistModule jpaModule = new JpaPersistModule(MOODCAT_PERSISTENCE_UNIT);
+
+    final Properties properties = getProperties();
+    setDatabasePassword(properties);
+
+    jpaModule.properties(properties);
+
+    install(jpaModule);
+}
+---------------------------------------------------------------------------------------------------------------------------
+@Override
+public void configure() {
+
+  bind(KuneProperties.class).toInstance(kuneProperties);
+
+  if (log4Conf == null) {
+    configureLog4j();
+  }
+
+  // precedence method param > properties
+  final String configuredJpaUnit = kuneProperties.get(KuneProperties.SITE_DB_PERSISTENCE_NAME);
+  final String jpaUnit = settedJpaUnit != null ? settedJpaUnit
+      : configuredJpaUnit != null ? configuredJpaUnit : "development";
+  LOG.info(String.format("Using persistence unit '%s' and properties '%s'", jpaUnit, kuneConfig));
+
+  final JpaPersistModule jpm = new JpaPersistModule(jpaUnit);
+
+  if (!jpaUnit.equals("test")) {
+    // In tests (and development) we don't override this db info)
+    final Properties dbProperties = new Properties();
+    final String dbUrl = kuneProperties.get(KuneProperties.SITE_DB_URL);
+    final String dbUser = kuneProperties.get(KuneProperties.SITE_DB_USER);
+    final String dbPass = kuneProperties.get(KuneProperties.SITE_DB_PASSWORD);
+    dbProperties.setProperty("hibernate.connection.url", dbUrl);
+    dbProperties.setProperty("hibernate.connection.username", dbUser);
+    dbProperties.setProperty("hibernate.connection.password", dbPass);
+
+    setPropertyIfExists(dbProperties, KuneProperties.SITE_DB_SCHEMA, "hibernate.hbm2ddl.auto");
+    setPropertyIfExists(dbProperties, KuneProperties.SITE_DB_C3P0_ACQUIRE_INCREMENT,
+        "hibernate.c3p0.acquire_increment");
+    setPropertyIfExists(dbProperties, KuneProperties.SITE_DB_C3P0_AUTOCOMMITONCLOSE,
+        "hibernate.c3p0.autoCommitOnClose");
+    setPropertyIfExists(dbProperties, KuneProperties.SITE_DB_C3P0_MAX_SIZE, "hibernate.c3p0.max_size");
+    setPropertyIfExists(dbProperties, KuneProperties.SITE_DB_C3P0_MAX_STATEMENTS,
+        "hibernate.c3p0.max_statements");
+    setPropertyIfExists(dbProperties, KuneProperties.SITE_DB_C3P0_MIN_SIZE, "hibernate.c3p0.min_size");
+    setPropertyIfExists(dbProperties, KuneProperties.SITE_DB_C3P0_TEST_PERIOD,
+        "hibernate.c3p0.idle_test_period");
+    setPropertyIfExists(dbProperties, KuneProperties.SITE_DB_C3P0_TIMEOUT, "hibernate.c3p0.timeout");
+
+    jpm.properties(dbProperties);
+    LOG.info(String.format("Using user '%s' and connection '%s'", dbUser, dbUrl));
+    // LOG.debug(String.format("dbpass '%s'", dbPass));
+
+    // <property name="hibernate.connection.provider_class"
+    // value="org.hibernate.connection.C3P0ConnectionProvider"/>
+    // <property name="hibernate.c3p0.min_size" value="5"/>
+    // <property name="hibernate.c3p0.max_size" value="50"/>
+    // <property name="hibernate.c3p0.timeout" value="100"/>
+    // <property name="hibernate.c3p0.max_statements" value="0"/>
+    // <property name="hibernate.c3p0.idle_test_period" value="3000"/>
+    // <property name="c3p0.preferredTestQuery" value="SELECT 1"/>
+
+  }
+
+  // http://google-guice.googlecode.com/svn/trunk/javadoc/com/google/inject/Injector.html
+  // (...) Just-in-time bindings created for child injectors will be
+  // created in an ancestor injector whenever possible (...)
+  // (This fails with finders, then we make explicit bindings)
+
+  jpm.addFinder(ContainerFinder.class);
+  jpm.addFinder(ContentFinder.class);
+  jpm.addFinder(ExtMediaDescripFinder.class);
+  jpm.addFinder(GroupFinder.class);
+  jpm.addFinder(I18nCountryFinder.class);
+  jpm.addFinder(I18nLanguageFinder.class);
+  jpm.addFinder(I18nTranslationFinder.class);
+  jpm.addFinder(LicenseFinder.class);
+  jpm.addFinder(RateFinder.class);
+  jpm.addFinder(TagFinder.class);
+  jpm.addFinder(TagUserContentFinder.class);
+  jpm.addFinder(UserFinder.class);
+  jpm.addFinder(UserSignInLogFinder.class);
+  jpm.addFinder(InvitationFinder.class);
+  jpm.addFinder(ParticipantEntityFinder.class);
+  jpm.addFinder(WaveEntityFinder.class);
+  install(jpm);
+
+  bind(Session.class).annotatedWith(DataSourceKune.class).toProvider(
+      DataSourceKuneSessionProvider.class);
+
+  final Provider<EntityManager> entityManagerProvider = binder().getProvider(EntityManager.class);
+  bind(EntityManager.class).annotatedWith(DataSourceKune.class).toProvider(entityManagerProvider);
+
+  transactionInterceptor = new KuneJpaLocalTxnInterceptor();
+  requestInjection(transactionInterceptor);
+  // bind(KuneJpaLocalTxnInterceptor.class).toInstance(transactionInterceptor);
+
+  bind(MY_DATA_SOURCE_ONE_FILTER_KEY).to(CustomPersistFilter.class);
+
+  expose(EntityManager.class).annotatedWith(DataSourceKune.class);
+  expose(Session.class).annotatedWith(DataSourceKune.class);
+  expose(KuneProperties.class);
+  expose(ContainerFinder.class);
+  expose(ContentFinder.class);
+  expose(ExtMediaDescripFinder.class);
+  expose(GroupFinder.class);
+  expose(I18nCountryFinder.class);
+  expose(I18nLanguageFinder.class);
+  expose(I18nTranslationFinder.class);
+  expose(LicenseFinder.class);
+  expose(RateFinder.class);
+  expose(TagFinder.class);
+  expose(TagUserContentFinder.class);
+  expose(UserFinder.class);
+  expose(UserSignInLogFinder.class);
+  expose(WaveEntityFinder.class);
+  expose(InvitationFinder.class);
+  expose(ParticipantEntityFinder.class);
+  expose(MY_DATA_SOURCE_ONE_FILTER_KEY);
+  // expose(KuneJpaLocalTxnInterceptor.class);
+
+  bind(GenericPersistenceInitializer.class).asEagerSingleton();
+}
+---------------------------------------------------------------------------------------------------------------------------
+@Override
+public void configure() {
+  if (kuneProperties.getBoolean(KuneProperties.SITE_OPENFIRE_IGNORE)) {
+    bind(XmppRosterProvider.class).to(XmppRosterProviderMock.class).in(Singleton.class);
+    expose(XmppRosterProvider.class);
+    bind(XmppRosterPresenceProvider.class).to(XmppRosterPresenceProviderMock.class).in(Singleton.class);
+    expose(XmppRosterPresenceProvider.class);
+  } else {
+    final JpaPersistModule jpm = new JpaPersistModule("openfire");
+
+    final Properties dbProperties = new Properties();
+
+    dbProperties.setProperty("hibernate.connection.url",
+        kuneProperties.get(KuneProperties.SITE_OPENFIRE_DB_URL));
+    dbProperties.setProperty("hibernate.connection.username",
+        kuneProperties.get(KuneProperties.SITE_OPENFIRE_DB_USER));
+    dbProperties.setProperty("hibernate.connection.password",
+        kuneProperties.get(KuneProperties.SITE_OPENFIRE_DB_PASSWORD));
+    dbProperties.setProperty("exclude-unlisted-classes", "true");
+
+    jpm.properties(dbProperties);
+    jpm.addFinder(OpenfireXmppRosterPresenceFinder.class);
+    jpm.addFinder(OpenfireXmppRosterFinder.class);
+    install(jpm);
+
+    bind(XmppRosterProvider.class).to(OpenfireXmppRosterProvider.class).in(Singleton.class);
+    bind(XmppRosterPresenceProvider.class).to(OpenfireXmppRosterPresenceProvider.class).in(
+        Singleton.class);
+    expose(XmppRosterProvider.class);
+    expose(XmppRosterPresenceProvider.class);
+
+    bind(Session.class).annotatedWith(DataSourceOpenfire.class).toProvider(
+        DataSourceOpenfireSessionProvider.class);
+    expose(Session.class).annotatedWith(DataSourceOpenfire.class);
+
+    final Provider<EntityManager> entityManagerProvider = binder().getProvider(EntityManager.class);
+    bind(EntityManager.class).annotatedWith(DataSourceOpenfire.class).toProvider(entityManagerProvider);
+    expose(EntityManager.class).annotatedWith(DataSourceOpenfire.class);
+
+    transactionInterceptor = new OpenfireJpaLocalTxnInterceptor();
+    requestInjection(transactionInterceptor);
+
+    expose(OpenfireXmppRosterPresenceFinder.class);
+    expose(OpenfireXmppRosterFinder.class);
+
+    bind(MY_DATA_SOURCE_TWO_FILTER_KEY).to(CustomPersistFilter.class);
+    expose(MY_DATA_SOURCE_TWO_FILTER_KEY);
+
+    bind(GenericPersistenceInitializer.class).asEagerSingleton();
+  }
+}
+---------------------------------------------------------------------------------------------------------------------------
+ public void testModuleConfigUsingJpa() throws Exception {
+    Logger.getLogger(getClass().getName()).info("Starting EDSL test.");
+    Guice.createInjector(Stage.PRODUCTION, new AbstractModule() {
+      @Override
+      protected void configure() {
+        install(new JpaPersistModule("myunit"));
+        binder().requireExplicitBindings();
+      }
+    });
+    Logger.getLogger(getClass().getName()).info("Completed EDSL test.");
+  }
+---------------------------------------------------------------------------------------------------------------------------
+@Inject
+  Configuration configuration;
+
+  @BeforeClass
+  public static void beforeClass() throws Exception{
+    injector = Guice.createInjector(new AuthorizationTestModule(), new JpaPersistModule("ambari-javadb"));
+    injector.getInstance(GuiceJpaInitializer.class);
+
+    apacheDSContainer = new ApacheDSContainer("dc=ambari,dc=apache,dc=org", "classpath:/users.ldif");
+    apacheDSContainer.setPort(33389);
+    apacheDSContainer.afterPropertiesSet();
+---------------------------------------------------------------------------------------------------------------------------
+@Inject
+  UserDAO userDAO;
+
+  @BeforeClass
+  public static void prepareData() {
+    injector = Guice.createInjector(new AuthorizationTestModule(), new JpaPersistModule("ambari-javadb"));
+    injector.getInstance(GuiceJpaInitializer.class);
+    injector.getInstance(OrmTestHelper.class).createTestUsers();
+  }
+---------------------------------------------------------------------------------------------------------------------------
+    bind(HeartBeatHandler.class).toInstance(handler);
+      bind(AmbariMetaInfo.class).toInstance(ambariMetaInfo);
+    }
+
+    private void installDependencies() {
+      install(new JpaPersistModule("ambari-javadb"));
+      install(new FactoryModuleBuilder().implement(
+          Cluster.class, ClusterImpl.class).build(ClusterFactory.class));
+      install(new FactoryModuleBuilder().implement(
+          Host.class, HostImpl.class).build(HostFactory.class));
+      install(new FactoryModuleBuilder().implement(
+---------------------------------------------------------------------------------------------------------------------------
+  bind(AmbariMetaInfo.class).toInstance(ambariMetaInfo);
+    bind(HostsMap.class).toInstance(hostsMap);
+   
+    bind(PasswordEncoder.class).toInstance(new StandardPasswordEncoder());
+
+    JpaPersistModule jpaPersistModule = new JpaPersistModule(configuration.getPersistenceType().getUnitName());
+    if (configuration.getPersistenceType() == PersistenceType.POSTGRES) {
+      Properties properties = new Properties();
+      properties.setProperty("javax.persistence.jdbc.user", configuration.getDatabaseUser());
+      properties.setProperty("javax.persistence.jdbc.password", configuration.getDatabasePassword());
+      jpaPersistModule.properties(properties);
+    }
+
+    install(jpaPersistModule);
+---------------------------------------------------------------------------------------------------------------------------
+http://www.massapi.com/class/jp/JpaPersistModule.html
+
